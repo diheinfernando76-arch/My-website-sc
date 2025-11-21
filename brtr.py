@@ -8,6 +8,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread, QObject, pyqtSignal, Qt, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QIcon
+import xml.etree.ElementTree as ET
+import pandas as pd
+import json
 
 # --- Credential Loading ---
 try:
@@ -35,6 +38,26 @@ class WorkerSignals(QObject):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
+def xml_xls_to_json_filtered(xml_file_path, json_file_path):
+    COLUMNS_TO_IGNORE = ['Nota Agenda','data_fine','tutto_il_giorno','data_inserimento','classe_desc','gruppo_desc','aula','materia']
+    RENAME_MAP = {'data_inizio':'data'}
+    NAMESPACES={'ss':'urn:schemas-microsoft-com:office:spreadsheet','':'urn:schemas-microsoft-com:office:spreadsheet'}
+    tree=ET.parse(xml_file_path); root=tree.getroot(); data=[]
+    worksheet=root.find('.//Worksheet',NAMESPACES)
+    header_row=worksheet.find('.//Row',NAMESPACES)
+    original_columns=[cell.find('ss:Data',NAMESPACES).text for cell in header_row.findall('ss:Cell',NAMESPACES) if cell.find('ss:Data',NAMESPACES) is not None]
+    column_indices_to_include=[]; final_columns=[]
+    for i,col in enumerate(original_columns):
+        if col not in COLUMNS_TO_IGNORE:
+            column_indices_to_include.append(i)
+            final_columns.append(RENAME_MAP[col] if col in RENAME_MAP else col)
+    for row in worksheet.findall('ss:Table/ss:Row',NAMESPACES)[1:]:
+        row_full=[cell.find('ss:Data',NAMESPACES).text for cell in row.findall('ss:Cell',NAMESPACES)]
+        while len(row_full)<len(original_columns): row_full.append(None)
+        data.append([row_full[i] for i in column_indices_to_include])
+    df=pd.DataFrame(data,columns=final_columns)
+    with open(json_file_path,'w',encoding='utf-8') as f: f.write(df.to_json(orient='records',indent=4,force_ascii=False))
+
 class AutomationWorker(QObject):
     def __init__(self, username, password, start_date, end_date):
         super().__init__()
@@ -48,6 +71,13 @@ class AutomationWorker(QObject):
         driver = None
         DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+        # --- Clean old downloaded files ---
+        for f in os.listdir(DOWNLOAD_DIR):
+            try:
+                os.remove(os.path.join(DOWNLOAD_DIR, f))
+            except:
+                pass
         try:
             self.signals.progress.emit("Starting Selenium web driver...")
             self.signals.step_progress.emit(10)
@@ -105,6 +135,25 @@ class AutomationWorker(QObject):
             self.signals.step_progress.emit(90)
 
             time.sleep(5)
+
+            # --- Rename latest downloaded file to data.xls ---
+            try:
+                files = os.listdir(DOWNLOAD_DIR)
+                if files:
+                    latest = max([os.path.join(DOWNLOAD_DIR, f) for f in files], key=os.path.getctime)
+                    new_path = os.path.join(DOWNLOAD_DIR, "data.xls")
+                    os.replace(latest, new_path)
+            except Exception as e:
+                self.signals.progress.emit(f"Rename error: {e}")
+
+            # --- Convert data.xls to output.json ---
+            try:
+                xml_xls_to_json_filtered(os.path.join(DOWNLOAD_DIR, "data.xls"), os.path.join(DOWNLOAD_DIR, "output.json"))
+                self.signals.progress.emit("JSON conversion finished.")
+            except Exception as e:
+                self.signals.progress.emit(f"JSON error: {e}")(latest, new_path)
+            except Exception as e:
+                self.signals.progress.emit(f"Rename error: {e}")
             self.signals.step_progress.emit(100)
             self.signals.finished.emit("Automation complete! Check your downloads folder.")
 
