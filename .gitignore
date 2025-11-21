@@ -1,2 +1,4 @@
 cred.py
 .venv/
+downloads/
+__pycache__/
